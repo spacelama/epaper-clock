@@ -51,6 +51,8 @@
 //#include "FreeMonoBold32pt7b.h"
 //#include "FreeMonoBold48pt7b.h"
 #include "FreeSansBold48pt7b.h"
+#include "FreeSans24pt7b.h"
+#include "FreeSansBold8pt7b.h"
 #include <GxIO/GxIO_SPI/GxIO_SPI.h>
 #include <GxIO/GxIO.h>
 #include <WiFi.h>
@@ -63,7 +65,12 @@ void display_setup(void)
 {
     Serial.println("setup display");
     display.init(); // enable diagnostic output on Serial
-    Serial.println("setup done");
+
+    display.setRotation(1);
+    display.setTextColor(GxEPD_BLACK);
+//    display.eraseDisplay(); // not for partial updates (but don't know how to handle after deep sleep)
+
+    Serial.println("display setup done");
 }
 
 
@@ -73,18 +80,15 @@ void display_setup(void)
 
 unsigned long time_start_ms=0;
 
-void display_loop()
+void display_time(char *time_string, char *temp_string)
 {
 // use asymmetric values for test
-    uint16_t box_x = 20;
+    uint16_t box_x = 10;
     uint16_t box_y = 25;
     uint16_t box_w = 60;
     uint16_t box_h = 20;
-    uint16_t cursor_y = GxEPD_WIDTH/2;
-    float value = 13.95;
-    display.setRotation(1);
+    uint16_t cursor_y = GxEPD_WIDTH/2+5; // Still need to allow room for temperature display
     display.setFont(&FreeSansBold48pt7b);
-    display.setTextColor(GxEPD_BLACK);
 
     // partial update to full screen to preset for partial update of box window
     // (this avoids strange background effects)
@@ -92,27 +96,37 @@ void display_loop()
 //    display.updateWindow(0, 0, GxEPD_HEIGHT, GxEPD_WIDTH, true);
 
     // from /home/tconnors/Arduino/micropython/e-Paper/Arduino/epd2in13/epd2in13.ino
-    for (int i=0; i<10; i++) {
-        unsigned long time_now_s = (millis() - time_start_ms) / 1000;
-        char time_string[] = {'0', '0', ':', '0', '0', '\0'};
-        time_string[0] = time_now_s / 60 / 10 + '0';
-        time_string[1] = time_now_s / 60 % 10 + '0';
-        time_string[3] = time_now_s % 60 / 10 + '0';
-        time_string[4] = time_now_s % 60 % 10 + '0';
-
-        display.fillRect(0, 0, GxEPD_HEIGHT, GxEPD_WIDTH, GxEPD_WHITE);
+//    for (int i=0; i<10; i++) {
+//        unsigned long time_now_s = (millis() - time_start_ms) / 1000;
+//        char time_string[] = {'0', '0', ':', '0', '0', '\0'};
+//        time_string[0] = time_now_s / 60 / 10 + '0';
+//        time_string[1] = time_now_s / 60 % 10 + '0';
+//        time_string[3] = time_now_s % 60 / 10 + '0';
+//        time_string[4] = time_now_s % 60 % 10 + '0';
+    display.fillScreen(GxEPD_WHITE);
+//   display.fillRect(0, 0, GxEPD_HEIGHT, GxEPD_WIDTH, GxEPD_WHITE);
 //        display.eraseDisplay(true); // not partial
-        display.setCursor(box_x, cursor_y);
-        display.print(time_string);
-        display.updateWindow(0, 0, GxEPD_WIDTH, GxEPD_HEIGHT, false);
-//            display.updateWindow(box_x, box_y, box_w, box_h, true);
-        display.powerDown();
-        // FIXME: need to follow instructions and powerdown, but the display starts to fade
-        delay(500);
-    }
+    display.setCursor(box_x, cursor_y);
+    display.print(time_string);
+//    display.print("\n");
+    Serial.println("displayed time_string "+String(time_string));
 
-    delay(10000);
-    display.update();
+    display.setFont(&FreeSans24pt7b);
+
+    display.setCursor(box_x, cursor_y+40);
+    display.print(temp_string);
+    display.print(" C");
+
+    display.setFont(&FreeSansBold8pt7b);
+    display.setCursor(box_x+65, cursor_y+20);
+    display.print("o");
+
+//            display.updateWindow(box_x, box_y, box_w, box_h, true);
+//        delay(500);
+//    }
+
+//    delay(10000);
+//    display.update();
 
 
 
@@ -125,6 +139,19 @@ void display_loop()
 //    epd.SetFrameMemory(paint.GetImage(), 80, 72, paint.GetWidth(), paint.GetHeight());
 //    epd.DisplayFrame();
 
-  delay(500);
+//  delay(500);
 
+}
+
+void display_fullupdate(void) {
+    display.update();
+}
+
+void display_partialupdate(void) {
+    display.updateWindow(0, 0, GxEPD_WIDTH, GxEPD_HEIGHT, false);
+}
+
+void display_powerdown(void) {
+    display.powerDown();
+    // FIXME: need to follow instructions and powerdown, but the display starts to fade (not anymore, it seems...)
 }

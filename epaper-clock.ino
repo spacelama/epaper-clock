@@ -27,6 +27,8 @@
 #include <RTClib.h>
 #include "Adafruit_LEDBackpack.h"
 #include <WebServer.h>
+#include "epaper-display.h"
+#include "temperature.h"
 
 String CODE_VERSION = "$Revision: 1.9 $";
 WebServer server(80);
@@ -39,13 +41,15 @@ WebServer server(80);
 // example of a timezone with a variable Daylight-Saving-Time:
 // demo: watch automatic time adjustment on Summer/Winter change (DST)
 #define MYTZ TZ_Australia_Melbourne
+#define NTP_SERVER "au.pool.ntp.org"
 
 timeval tv;
 struct timezone tz;
 timespec tp;
 time_t tnow;
 
-time_t tlast_ntp_sync = 0;
+bool delay_startup=false;
+unsigned long delay_shutdown;
 
 // Set to false to display time in 12 hour format, or true to use 24 hour:
 #define TIME_24_HOUR      true
@@ -71,11 +75,6 @@ int hours = 0;
 int minutes = 0;
 int seconds = 0;
 
-int direction = 0;
-int count_h = 0;
-int count_m = 0;
-int count_s = 0;
-
 // OPTIONAL: change SNTP startup delay
 // a weak function is already defined and returns 0 (RFC violation)
 // it can be redefined:
@@ -98,6 +97,14 @@ String text;
 
 struct tm timeinfo_wrapper;
 
+RTC_DATA_ATTR time_t tlast_ntp_sync = 0;
+
+int last_hour=-1; // doesn't need to preserve over deep sleep because
+                  // RTC only wakes us up once per minute anyway, so
+                  // we always need to redraw.  This is for when
+                  // tightlooping while power is still applied
+int last_minute=-1;
+
 void http_gettime() {
     String content = asctime(localtime(&tnow)); // formated local time
 
@@ -107,7 +114,7 @@ void http_gettime() {
     sprintf(time,"isdst:%i ; %02i:%02i:%02i\n",
             now->tm_isdst,
             now->tm_hour,now->tm_min,now->tm_sec);
-    
+
     server.send(200, "text/html", content+time);
 }
 
@@ -122,71 +129,25 @@ void http_setbright() {
     server.send(200, "text/html", content);
 }
 
-void http_count() {
-    char content[80]="";
-    int time=0;
-    char *direction_str;
-    if(server.hasArg("down")) {
-        time = server.arg("down").toInt();
-        direction = -1;
-        direction_str = "down";
-    } else if(server.hasArg("up")) {
-        time = server.arg("up").toInt();
-        direction = 1;
-        direction_str = "up";
-    } else {
-        server.send(200, "text/html", "No up or down parameter in sec supplied\n");
-        return;
-    }
-
-    count_h = time / 3600;
-    count_m = (time / 60) % 60;
-    count_s = time % 60;
-
-    snprintf(content,80,"Setting count%s to: %02d:%02d:%02d\n", direction_str, count_h,count_m,count_s);
-    server.send(200, "text/html", content);
-}
-
-void http_clear() {
-    String content;
-    direction = 0;
-    count_h = count_m = count_s = 0;
-    text = "";
-    content="Clearing custom displays\n";;
-    server.send(200, "text/html", content);
-}
-
-void http_settext() {
-    String content;
-    if(server.hasArg("text")) {
-        text = server.arg("text");
-    } else {
-        server.send(200, "text/html", "No text parameter supplied\n");
-        return;
-    }
-    content="Setting text to: "+text+"\n";
-    server.send(200, "text/html", content);
-}
-
-void rotaryBlink() {
-        // Blink the colon by flipping its value every loop iteration
-        // (which happens every second).
+void showTimeOutOfSync() {
+    // Blink the colon by flipping its value every loop iteration
+    // (which happens every second).
 
 //        blinkColon = !blinkColon;
 //        clockDisplay.drawColon(blinkColon);
-        //000010 ; 0x02 = normal colon
-        //000111 ; 0x07 = normal colon and top left dot
-        //001000 ; 0x08 = bottom left dot
-        //001010 ; 0x0a = normal colon and bottom left dot
-        //001100 ; 0x0c = left colon
-        //001110 ; 0x0e = both colons
-        //010000 ; 0x10 = top right top
-        //010110 ; 0x16 = all but bottom left dot
-        //011110 ; 0x1E = all dots (no, I don't know why 5 1's aren't lit up)
+    //000010 ; 0x02 = normal colon
+    //000111 ; 0x07 = normal colon and top left dot
+    //001000 ; 0x08 = bottom left dot
+    //001010 ; 0x0a = normal colon and bottom left dot
+    //001100 ; 0x0c = left colon
+    //001110 ; 0x0e = both colons
+    //010000 ; 0x10 = top right top
+    //010110 ; 0x16 = all but bottom left dot
+    //011110 ; 0x1E = all dots (no, I don't know why 5 1's aren't lit up)
 //        clockDisplay.drawColon(blinkColon,2,0b011110);
 //        clockDisplay.drawColon(!blinkColon,2,0x4);
 
-    Serial.println("Rotaryblink()");
+    Serial.println("showTimeOutOfSync()");
     blinkPatternIndex++;
     if (blinkPatternIndex > 3) {
         blinkPatternIndex = 0;
@@ -213,102 +174,70 @@ String http_uptime_stub() {
 // once per hour by default whenever actively synced, but FIXME: want
 // to verify what happens when lose sync and before connection made in
 // first place
-void time_is_set_scheduled() {
+void time_is_set_scheduled(timeval*) {
     Serial.println("------------------ settimeofday() was called ------------------");
     tlast_ntp_sync = time(nullptr);
 }
 
-void setup_stub() {
-
-/*  for(int i = 0; i < 10; i++)
-    {
-    printf("in setup\n");
-    delay(500);
-    } */
-
-    // set time from RTC
-    // Normally you would read the RTC to eventually get a current UTC time_t
-    // this is faked for now.
-    time_t rtc_time_t = 46800; // fake RTC time for now
-
-    timezone tz = { 0, 0};
-    timeval tv = { rtc_time_t, 0};
-
-    // DO NOT attempt to use the timezone offsets
-    // The timezone offset code is really broken.
-    // if used, then localtime() and gmtime() won't work correctly.
-    // always set the timezone offsets to zero and use a proper TZ string
-    // to get timezone and DST support.
-
-    // set the time of day and explicitly set the timezone offsets to zero
-    // as there appears to be a default offset compiled in that needs to
-    // be set to zero to disable it.
-    settimeofday(&tv, &tz);
-
+void configureTime(bool resetNtp) {
     // set function to call when time is set
     // is called by NTP code when NTP is used
-//FIXME:    settimeofday_cb(time_is_set_scheduled);
+    sntp_set_time_sync_notification_cb(time_is_set_scheduled);
+    if (resetNtp || (tlast_ntp_sync == 0) || (tnow - tlast_ntp_sync > 3600)) {
+        configTzTime(MYTZ, NTP_SERVER);
+    } else {
+        setenv("TZ", MYTZ, 1);
+        tzset();
+    }
+}
 
-    // set up TZ string to use a POSIX/gnu TZ string for local timezone
-    // TZ string information:
-    // https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-//  setenv("TZ", "CST+6CDT,M3.2.0/2,M11.1.0/2", 1);
-    // Australia/Melbourne:
-    // enable NTP by setting up NTP server(s)
-    // up to 3 ntp servers can be specified
-    // configTime(tzoffset, dstflg, "ntp-server1", "ntp-server2", "ntp-server3");
-    // set both timezone offet and dst parameters to zero 
-    // and get real timezone & DST support by using a TZ string
-    configTzTime(MYTZ, "au.pool.ntp.org");
+void http_start_stub() {
+    server.on("/", http_gettime);
+    server.on("/time", http_gettime);
+    server.on("/bright", http_setbright);
+}
 
-    // A summary of the NTP/TZ situtation can be found in this comment here: https://www.reddit.com/r/esp8266/comments/jm35k9/clock_project_automatically_adjusts_for_day_light/gassnzj/
-    // const char* TZ_INFO = "GMT+0BST-1,M3.5.0/01:00:00,M10.5.0/02:00:00";
-    // const char* ntpServer = "uk.pool.ntp.org";
-    // configTime(0, 0, ntpServer);
-    // setenv("TZ", TZ_INFO, 1);
-    // tzset();
-    //
-    // NTP tz_info for your location can be found here: https://remotemonitoringsystems.ca/time-zone-abbreviations.php or in TZ.h
+void setup_stub() {
+//    delay(1000); //Take some time to open up the Serial Monitor
 
-
-    // don't wait, observe time changing when ntp timestamp is received
+    if (!bootCount) { // if turning on for first time
+        configureTime(true);
+        delay_startup=true; // wait for NTP
+    } else { // if waking from sleep
+        configureTime(false);
+    }
 
     Serial.println();
 
-    Serial.println("RTC-Clock-MinExample Example");
+    Serial.println("epaper clock");
 
 //  while (WiFi.status() != WL_CONNECTED) {
 //    delay(500);
 //    Serial.print(".");
 //  }
 
-    server.on("/", http_gettime);
-    server.on("/time", http_gettime);
-    server.on("/count", http_count);
-    server.on("/clear", http_clear);
-    server.on("/settext", http_settext);
-    server.on("/bright", http_setbright);
-
     // Setup the display.
 //FIXME:     clockDisplay.begin(DISPLAY_ADDRESS);
 
     // Setup the DS1307 real-time clock.
-    rtc.begin();
+//    rtc.begin();
 
     // Set the DS1307 clock if it hasn't been set before.
-    bool setClockTime = !rtc.isrunning();
+//    bool setClockTime = !rtc.isrunning();
     // Alternatively you can force the clock to be set again by
     // uncommenting this line:
     //setClockTime = true;
-    if (setClockTime) {
-        Serial.println("Setting DS1307 time!");
+//    if (setClockTime) {
+//        Serial.println("Setting DS1307 time!");
         // This line sets the DS1307 time to the exact date and time the
         // sketch was compiled:
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+//        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
         // Alternatively you can set the RTC with an explicit date & time, 
         // for example to set January 21, 2014 at 3am you would uncomment:
         //rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
-    }
+//    }
+
+    display_setup();
 }
 
 // for testing purpose:
@@ -328,43 +257,56 @@ void printTm (const char* what, const tm* tm)
 
 void loop_stub()
 {
+    char time_string[] = "00:00";
+    char temp_string[] = "----";
+    float temp=-127;
+
     gettimeofday(&tv, &tz);
     clock_gettime(0, &tp); // also supported by esp8266 code
     tnow = time(nullptr);
     bool fast_blink = false;
+
+    bool power_isnt_connected=(tnow - tlast_ntp_sync) > 10; // FIXME: detect power connected or on battery power
 
     // localtime / gmtime every second change
     static time_t lastv = 0;
     if ((tlast_ntp_sync == 0 || (tnow - tlast_ntp_sync > 86400))) {
         fast_blink=true;
     }
+
+    struct tm *now = localtime(&tnow);
+    hours = now->tm_hour;
+    minutes  = now->tm_min;
+    seconds  = now->tm_sec;
+
+    if (!tlast_ntp_sync && delay_startup) {
+        Serial.printf ("Waiting for ntp to set time: tnow, millis=%d, %d\n", tnow, millis());
+        delay(100);
+        return;
+    }
+
+    minutes = 0 ; // FIXME: need to test what's happening when minutes == 0
     if (lastv != tv.tv_sec) {
+        configureTime(false);
+
 #if 1
-        printf("tz_minuteswest: %d, tz_dsttime: %d\n", tz.tz_minuteswest, tz.tz_dsttime);
-        printf("gettimeofday() tv.tv_sec : %ld\n", lastv);
-        printf("time()            time_t : %ld\n", tnow);
-        Serial.println();
+        Serial.printf("time()=%d, tlast_ntp_sync=%d, (tnow - tlast_ntp_sync)=%d\n", tnow, tlast_ntp_sync, tnow - tlast_ntp_sync);
 #endif
 
-        printf("         ctime: %s", ctime(&tnow)); // print formated local time
+//        printf("         ctime: %s", ctime(&tnow)); // print formated local time
         printf(" local asctime: %s", asctime(localtime(&tnow))); // print formated local time
         printf("gmtime asctime: %s", asctime(gmtime(&tnow))); // print formated gm time
 	
         // print gmtime and localtime tm members
-        printTm("      gmtime", gmtime(&tnow));
-        Serial.println();
+//        printTm("      gmtime", gmtime(&tnow));
+//        Serial.println();
         printTm("   localtime", localtime(&tnow));
         Serial.println();
 
         Serial.println();
 
-        struct tm *now = localtime(&tnow);
-        hours = now->tm_hour;
-        minutes  = now->tm_min;
-        seconds  = now->tm_sec;
-
         // Loop function runs over and over again to implement the clock logic.
-  
+
         // Check if it's the top of the hour and get a new time reading
         // from the DS1307.  This helps keep the clock accurate by fixing
         // any drift.
@@ -390,128 +332,82 @@ void loop_stub()
         /*   minutes = now.minute(); */
         /* } */
 
-        // Show the time on the display by turning it into a numeric
-        // value, like 3:30 turns into 330, by multiplying the hour by
-        // 100 and then adding the minutes.
-        int displayValue;
-        int custom_display = false;
+        bool update_display=false;
+        if (last_minute != minutes) {
+            temp = readDSTemperatureC();
 
-        // first work out whether we need to increment/decrement a timer
-        if (direction != 0) {
-            count_s += direction;
-            if (count_s >= 60) {
-                count_s=0;
-                count_m++;
+            if(temp == -127.00) {
+                Serial.println("Failed to read from DS18B20 sensor");
+            } else {
+                Serial.print("Temperature Celsius: ");
+                sprintf(temp_string, "%.1f",temp);
             }
-            if (count_m >= 60) {
-                count_m=0;
-                count_h++;
-            }
-            if (count_s < 0) {
-                count_s=59;
-                count_m--;
-            }
-            if (count_m < 0) {
-                count_m=59;
-                count_h--;
-            }
-            if (count_h < 0) { // time to reset
-                count_h = count_m = count_s = direction = 0;
-            }
-        }
-        //then work out whether to display it (alternate every 2
-        //seconds between clock and countdown/text)
-        if (seconds % 8 >= 4) {
-            if (direction) {
-                displayValue = count_m * 100 + count_s; // discard hh for now...
 
-//FIXME:                 clockDisplay.print(displayValue, DEC);
-                custom_display = true;
-
-                fast_blink = false;
-                uint8_t colon_bits = 0x0E;
-//FIXME:                 clockDisplay.writeDigitRaw(2,colon_bits);
-            } else if (text != "") {
-                for (int i=0;i<4;i++) {
-                    int d=i;
-                    if (d>1) {
-                        d++;
-                    }
-                    char c=text[i];
-                    uint8_t enc=0;
-                    switch (c) {
-                      case 'a': enc=0x77; break;
-                      case 'b': enc=0x7c; break;
-                      case 'c': enc=0x39; break;
-                      case 'd': enc=0x5e; break;
-                      case 'e': enc=0x79; break;
-                      case 'f': enc=0x71; break;
-                      case 'g': enc=0x3d; break;
-                      case 'i': enc=0x06; break;
-                      case 'l': enc=0x38; break;
-                      case 'o': enc=0x3f; break;
-                      case 'w': enc=0x4f; break;
-                    }
-//FIXME:                     clockDisplay.writeDigitRaw(d, enc);
-                }
-                custom_display = true;
-
-                fast_blink = false;
-                uint8_t colon_bits = 0x0E;
-//FIXME:                 clockDisplay.writeDigitRaw(2,colon_bits);
-            }
-        }
-        if (!custom_display) {
-            displayValue = hours*100 + minutes;
-
-            // Do 24 hour to 12 hour format conversion when required.
-            if (!TIME_24_HOUR) {
-                // Handle when hours are past 12 by subtracting 12 hours (1200 value).
-                if (hours > 12) {
-                    displayValue -= 1200;
-                }
-                // Handle hour 0 (midnight) being shown as 12.
-                else if (hours == 0) {
-                    displayValue += 1200;
-                }
-            }
+            sprintf(time_string, "%02d:%02d", hours, minutes);
 
             // Now print the time value to the display.
-//FIXME:             clockDisplay.print(displayValue, DEC);
-
-            // Add zero padding when in 24 hour mode and it's midnight.
-            // In this case the print function above won't have leading 0's
-            // which can look confusing.  Go in and explicitly add these zeros.
-            if (TIME_24_HOUR && hours == 0) {
-                // Pad hour 0.
-//FIXME:                 clockDisplay.writeDigitNum(1, 0);
-                // Also pad when the 10's minute is 0 and should be padded.
-                if (minutes < 10) {
-//FIXME:                     clockDisplay.writeDigitNum(3, 0);
-                }
-            }
-
-            if ((tlast_ntp_sync == 0 || (tnow - tlast_ntp_sync > 86400))) {
-                // Fast blink already handled outside of loop
-            } else if (tnow - tlast_ntp_sync > 3600) {
-                rotaryBlink();
-            } else {
-                blink();
-            }
+            display_time(time_string, temp_string);
+            update_display=true;
         }
-    }
-    if (fast_blink) {
-        rotaryBlink();
-    }
-    if (fast_blink || (lastv != tv.tv_sec)) {
-        lastv = tv.tv_sec;
-        // Now push out to the display the new values that were set above.
+
+        if ((tlast_ntp_sync == 0 || (tnow - tlast_ntp_sync > 86400))) {
+            // Fast blink already handled outside of loop
+        } else if (tnow - tlast_ntp_sync > 3600) {
+            showTimeOutOfSync();  // FIXME: handle this within main display routine
+//            update_display=true;
+        } else {
+            blink();
+        }
+        if (fast_blink) {
+            showTimeOutOfSync();
+        }
+        if (fast_blink || (lastv != tv.tv_sec)) {
+            lastv = tv.tv_sec;
+            // Now push out to the display the new values that were set above.
 //FIXME:         clockDisplay.writeDisplay();
 
-        // Loop code is finished, it will jump back to the start of the loop
-        // function again!
+            // Loop code is finished, it will jump back to the start of the loop
+            // function again!
+        }
+        if ((minutes == 0) && power_isnt_connected && !delay_shutdown) {  // prior to deep sleep, we'd say: last_hour != hours
+            if (update_display) {
+                Serial.println("Full updating display");
+                display_fullupdate();
+            }
+            delay_shutdown=millis() + 5000; // make sure display has fully refreshed, and give time for ntp to recieve responses
+            next_boot_need_wifi = true;
+        } else {
+            if (update_display) {
+                Serial.println("Partial updating display");
+                display_partialupdate();
+            }
+        }
+
+        last_hour=hours;
+        last_minute=minutes;
+
+        display_powerdown();
+
+//        delay(1000); // FIXME: convert this to an RTC sleep
     }
-    
-    
-    delay(100);
+    // FIXME: if time is between sunset and sunrise (can we sense
+    // light?), and power is on, light foreground light.
+//    Serial.printf("power_isnt_connected=%d,delay_shutdown=%d\n", power_isnt_connected, delay_shutdown);
+    if (power_isnt_connected && (
+            !delay_shutdown ||
+            (millis() > delay_shutdown))) {
+        ledBright(led_range);
+
+        int next_min = 60-now->tm_sec;
+        Serial.printf("RTC sleeping for %d seconds\n", next_min);
+
+        // deep sleep explained here: https://randomnerdtutorials.com/esp32-deep-sleep-arduino-ide-wake-up-sources/ https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/sleep_modes.html
+        esp_sleep_enable_timer_wakeup(1000000LL * next_min);
+        Serial.flush();
+        // https://old.reddit.com/r/esp32/comments/idinjr/36ma_deep_sleep_in_an_eink_ttgo_t5_v23/ghx00sa/ linked from https://old.reddit.com/r/esp32/comments/idinjr/36ma_deep_sleep_in_an_eink_ttgo_t5_v23/ghx00sa/
+        pinMode(13, OUTPUT);
+        digitalWrite(13, HIGH);
+        gpio_deep_sleep_hold_en();
+        esp_deep_sleep_start();
+    }
 }
