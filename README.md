@@ -21,5 +21,7 @@ Configure the variables in ../template32/Makefile per the template there in Make
 
 # Install:
 Perhaps change the UPLOAD_PORT and .DEFAULT_GOAL in Makefile
+
 run `make`
+
 You'll probably need `.DEFAULT_GOAL := flash` with `UPLOAD_PORT := /dev/ttyUSB???` initally until you have a valid image on your device.  Then if you've configured variables correctly and you can talk to the device on the network, you can revert thereon back to `.DEFALT_GOAL := ota`
